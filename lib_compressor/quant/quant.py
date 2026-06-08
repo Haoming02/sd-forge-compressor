@@ -8,14 +8,11 @@ from comfy_kitchen.float_utils import F8_E4M3_MAX
 from tqdm import tqdm
 
 from backend.memory_management import get_torch_device
-from modules_forge.packages.huggingface_guess import guess
 
 from .. import STATE_DICT, load, save
 from . import MODELS
 
-TARGET: str = None
-INCL: tuple[str] = None
-EXCL: tuple[str] = None
+EXCL = ("embed", "norm", "first_stage_model", "cond_stage_model", "vae", "text_encoder")
 
 
 def _encode(info: dict[str, str]) -> torch.Tensor:
@@ -26,14 +23,17 @@ def scale_amax(w: torch.Tensor, max_value: float):
     return torch.amax(w.abs()).to(dtype=torch.float32) / max_value
 
 
-def filter(key: str) -> bool:
+def filter(key: str, weight: torch.Tensor) -> bool:
     if not key.endswith(".weight"):
         return False
-    if TARGET not in key:
+    if any(excl in key for excl in EXCL):
         return False
-    if any(l in key for l in EXCL):
+    if weight.dtype not in (torch.float16, torch.bfloat16, torch.float32):
         return False
-    return any(l in key for l in INCL)
+    if weight.ndim != 2:
+        return False
+
+    return weight.size(0) % 64 == 0 and weight.size(1) % 64 == 0
 
 
 def _quant_fp8(state_dict: STATE_DICT) -> STATE_DICT:
@@ -46,7 +46,7 @@ def _quant_fp8(state_dict: STATE_DICT) -> STATE_DICT:
     for key in tqdm(_keys):
         weight = state_dict.pop(key)
 
-        if not filter(key):
+        if not filter(key, weight):
             if weight.dtype is torch.float32:
                 weight = weight.to(dtype=torch.float16)
             quant_sd[key] = weight
@@ -70,21 +70,6 @@ def quant_to_dtype(model: str, mode: str):
 
     path: str = MODELS[model]
     sd, meta = load(path)
-
-    try:
-        if (mdl := guess(sd)) is None:
-            raise SystemError
-    except Exception:
-        raise gr.Error("Unrecognized Model...")
-
-    if not mdl.huggingface_repo.endswith("Anima"):
-        raise gr.Error('Only "Anima" is supported currently...')
-
-    global TARGET, INCL, EXCL
-
-    TARGET = "blocks."
-    INCL = ("q_proj", "k_proj", "v_proj", "o_proj", "output_proj", ".mlp")
-    EXCL = ("llm_adapter",)
 
     new_sd = _quant_fp8(sd)
     del sd
