@@ -2,7 +2,11 @@ import os.path
 from json import dumps
 
 import torch
-from comfy_kitchen import quantize_mxfp8, quantize_per_tensor_fp8
+from comfy_kitchen import (
+    quantize_int8_tensorwise,
+    quantize_mxfp8,
+    quantize_per_tensor_fp8,
+)
 from comfy_kitchen.float_utils import (
     F4_E2M1_MAX,
     F8_E4M3_MAX,
@@ -17,8 +21,11 @@ from backend.memory_management import get_torch_device, soft_empty_cache
 
 from .. import STATE_DICT, load, save
 from . import MODELS
+from .convrot import build_hadamard, rotate_weight
 
 EXCL = ("embed", "norm", "first_stage_model", "cond_stage_model", "vae", "text_encoder")
+
+INT8_MAX = 127.0
 
 
 def _encode(info: dict[str, str]) -> torch.Tensor:
@@ -190,6 +197,41 @@ def _quant_mxfp8(state_dict: STATE_DICT) -> STATE_DICT:
     return quant_sd
 
 
+def _quant_int8(state_dict: STATE_DICT) -> STATE_DICT:
+    quant_sd = {}
+    quant_info = {
+        "format": "int8_tensorwise",
+        "convrot": True,
+        "convrot_groupsize": 256,
+    }
+
+    device = get_torch_device()
+
+    _keys = list(state_dict.keys())
+    for key in tqdm(_keys):
+        weight = state_dict.pop(key)
+
+        if not filter(key, weight):
+            if weight.dtype is torch.float32:
+                weight = weight.to(dtype=torch.float16)
+            quant_sd[key] = weight
+            continue
+
+        H = build_hadamard(256, device="cpu", dtype=weight.dtype)
+        weight = rotate_weight(weight, H, group_size=256)
+
+        weight = weight.to(device=device)
+
+        weight_scale = scale_amax(weight, INT8_MAX)
+        weight_quantized, _ = quantize_int8_tensorwise(weight, weight_scale)
+
+        quant_sd[key] = weight_quantized.cpu()
+        quant_sd[key.replace(".weight", ".weight_scale")] = weight_scale.cpu()
+        quant_sd[key.replace(".weight", ".comfy_quant")] = _encode(quant_info)
+
+    return quant_sd
+
+
 @torch.inference_mode()
 def quant_to_dtype(model: str, mode: str):
     path: str = MODELS[model]
@@ -202,6 +244,8 @@ def quant_to_dtype(model: str, mode: str):
             new_sd = _quant_nvfp4(sd)
         case "mxfp8":
             new_sd = _quant_mxfp8(sd)
+        case "int8_convrot":
+            new_sd = _quant_int8(sd)
 
     del sd
     soft_empty_cache()

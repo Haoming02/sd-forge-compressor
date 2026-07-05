@@ -17,8 +17,8 @@ def quant_ui():
             scale=6,
         )
         mode = gr.Dropdown(
-            choices=("fp8_scaled", "nvfp4", "mxfp8"),
-            value="fp8_scaled",
+            choices=("fp8_scaled", "nvfp4", "mxfp8", "int8_convrot"),
+            value="int8_convrot",
             label="Format",
             scale=2,
         )
