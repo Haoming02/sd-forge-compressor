@@ -14,6 +14,7 @@ from comfy_kitchen.tensor import (
 from tqdm import tqdm
 
 from backend.memory_management import get_torch_device, soft_empty_cache
+from backend.patcher.lora import string_to_seed
 
 from .. import STATE_DICT, load, save
 from . import MODELS
@@ -69,9 +70,7 @@ def quant_fp8(state_dict: STATE_DICT) -> STATE_DICT:
         weight = state_dict.pop(key)
 
         if not _filter(key, weight):
-            if weight.dtype is torch.float32:
-                weight = weight.to(dtype=torch.float16)
-            quant_sd[key] = weight
+            quant_sd[key] = weight.to(dtype=torch.bfloat16)
             continue
 
         weight = weight.to(device=device)
@@ -96,14 +95,12 @@ def quant_nvfp4(state_dict: STATE_DICT) -> STATE_DICT:
         weight = state_dict.pop(key)
 
         if not _filter(key, weight):
-            if weight.dtype is torch.float32:
-                weight = weight.to(dtype=torch.float16)
-            quant_sd[key] = weight
+            quant_sd[key] = weight.to(dtype=torch.bfloat16)
             continue
 
         weight = weight.to(device=device)
 
-        qdata, params = TensorCoreNVFP4Layout.quantize(weight)
+        qdata, params = TensorCoreNVFP4Layout.quantize(weight, scale="recalculate")
 
         quant_sd[key] = qdata.cpu()
         quant_sd[key.replace(".weight", ".weight_scale")] = params.block_scale.cpu()
@@ -124,9 +121,7 @@ def quant_mxfp8(state_dict: STATE_DICT) -> STATE_DICT:
         weight = state_dict.pop(key)
 
         if not _filter(key, weight):
-            if weight.dtype is torch.float32:
-                weight = weight.to(dtype=torch.float16)
-            quant_sd[key] = weight
+            quant_sd[key] = weight.to(dtype=torch.bfloat16)
             continue
 
         weight = weight.to(device=device)
@@ -140,13 +135,12 @@ def quant_mxfp8(state_dict: STATE_DICT) -> STATE_DICT:
     return quant_sd
 
 
-def quant_int8(state_dict: STATE_DICT) -> STATE_DICT:
+def quant_int8(state_dict: STATE_DICT, convrot: bool = False) -> STATE_DICT:
     quant_sd = {}
-    quant_info = {
-        "format": "int8_tensorwise",
-        "convrot": True,
-        "convrot_groupsize": CONVROT_GROUPSIZE,
-    }
+    quant_info = {"format": "int8_tensorwise"}
+    if convrot:
+        quant_info["convrot"] = True
+        quant_info["convrot_groupsize"] = CONVROT_GROUPSIZE
 
     device = get_torch_device()
 
@@ -154,7 +148,7 @@ def quant_int8(state_dict: STATE_DICT) -> STATE_DICT:
     for key in tqdm(_keys):
         weight = state_dict.pop(key)
 
-        if not _filter(key, weight, group_size=CONVROT_GROUPSIZE):
+        if not _filter(key, weight, group_size=CONVROT_GROUPSIZE if convrot else 64):
             quant_sd[key] = weight.to(torch.bfloat16)
             continue
 
@@ -162,8 +156,10 @@ def quant_int8(state_dict: STATE_DICT) -> STATE_DICT:
 
         qdata, params = TensorWiseINT8Layout.quantize(
             weight,
+            stochastic_rounding=string_to_seed(key),
+            is_weight=True,
             per_channel=True,
-            convrot=True,
+            convrot=convrot,
             convrot_groupsize=CONVROT_GROUPSIZE,
         )
 
@@ -198,6 +194,8 @@ def quant_int4(state_dict: STATE_DICT) -> STATE_DICT:
             weight,
             convrot_groupsize=CONVROT_GROUPSIZE,
             quant_group_size=QUANT_GROUPSIZE,
+            stochastic_rounding=string_to_seed(key),
+            linear_dtype="int4",
         )
 
         quant_sd[key] = qdata.cpu()
@@ -219,8 +217,10 @@ def quant_to_dtype(model: str, mode: str):
             new_sd = quant_nvfp4(sd)
         case "mxfp8":
             new_sd = quant_mxfp8(sd)
-        case "int8_convrot":
+        case "int8":
             new_sd = quant_int8(sd)
+        case "int8_convrot":
+            new_sd = quant_int8(sd, True)
         case "convrot_w4a4":
             new_sd = quant_int4(sd)
 
