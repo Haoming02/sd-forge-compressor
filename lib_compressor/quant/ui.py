@@ -16,26 +16,24 @@ def quant_ui():
             label="Model to Convert",
             scale=6,
         )
-        mode = gr.Dropdown(
-            choices=(
-                "fp8_scaled",
-                "nvfp4",
-                "mxfp8",
-                "int8",
-                "int8_convrot",
-                "convrot_w4a4",
-            ),
-            value="int8_convrot",
-            label="Format",
-            scale=2,
-        )
-        button = gr.Button(
-            value="Convert",
-            variant="primary",
-            scale=2,
-        )
+        with gr.Column(scale=1):
+            mode = gr.Dropdown(
+                choices=(
+                    "fp8_scaled",
+                    "nvfp4",
+                    "mxfp8",
+                    "int8",
+                    "int8_convrot",
+                    "convrot_w4a4",
+                ),
+                value="int8_convrot",
+                label="Format",
+                scale=2,
+            )
+            firstlast = gr.Checkbox(True, label="Exclude First & Last Layers")
+        button = gr.Button(value="Convert", variant="primary")
 
-    for comp in (target, mode, button):
+    for comp in (target, mode, firstlast, button):
         comp.do_not_save_to_config = True
 
     button.click(
@@ -43,7 +41,7 @@ def quant_ui():
         outputs=[button],
         queue=False,
         show_progress=False,
-    ).then(fn=quant_to_dtype, inputs=[target, mode]).then(
+    ).then(fn=quant_to_dtype, inputs=[target, mode, firstlast]).then(
         fn=lambda: gr.update(interactive=True),
         outputs=[button],
         queue=False,

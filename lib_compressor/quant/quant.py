@@ -22,7 +22,7 @@ from . import MODELS
 CONVROT_GROUPSIZE: Final[int] = 256
 QUANT_GROUPSIZE: Final[int] = 64
 
-EXCL: Final[tuple[str]] = (
+COMMON_EXCL: Final[tuple[str]] = (
     "embed",
     "bias",
     "norm",
@@ -36,6 +36,8 @@ EXCL: Final[tuple[str]] = (
     "time",
 )
 
+LAYER_EXCL: list[str] = []
+
 
 def _encode(info: dict[str, str]) -> torch.Tensor:
     return torch.tensor(list(dumps(info).encode("utf-8")), dtype=torch.uint8)
@@ -45,6 +47,29 @@ def _scale_amax(w: torch.Tensor, max_value: float) -> torch.Tensor:
     return w.abs().max().float().div(max_value).clamp(min=1e-8)
 
 
+def _parse_layers(layers: list[str]):
+    import re
+
+    pattern = re.compile(r"(layer|block)s?\.(\d+)\.")
+
+    min_, max_ = 999, -1
+    min_excl, max_excl = None, None
+
+    for key in layers:
+        if m := pattern.search(key):
+            idx = int(m.group(2))
+
+            if idx > max_:
+                max_ = idx
+                max_excl = m.group(0)
+            if idx < min_:
+                min_ = idx
+                min_excl = m.group(0)
+
+    if min_excl and max_excl:
+        LAYER_EXCL.extend([min_excl, max_excl])
+
+
 def _filter(key: str, weight: torch.Tensor, *, group_size: int = 64) -> bool:
     if not key.endswith(".weight"):
         return False
@@ -52,7 +77,9 @@ def _filter(key: str, weight: torch.Tensor, *, group_size: int = 64) -> bool:
         return False
     if weight.ndim != 2:
         return False
-    if any(excl in key.lower() for excl in EXCL):
+    if any(excl in key for excl in LAYER_EXCL):
+        return False
+    if any(excl in key.lower() for excl in COMMON_EXCL):
         return False
 
     in_features: int = weight.size(0)
@@ -206,9 +233,13 @@ def quant_int4(state_dict: STATE_DICT) -> STATE_DICT:
 
 
 @torch.inference_mode()
-def quant_to_dtype(model: str, mode: str):
+def quant_to_dtype(model: str, mode: str, exclude: bool):
     path: str = MODELS[model]
     sd, meta = load(path)
+    LAYER_EXCL.clear()
+
+    if exclude:
+        _parse_layers(list(sd.keys()))
 
     match mode:
         case "fp8_scaled":
