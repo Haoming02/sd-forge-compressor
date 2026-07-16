@@ -5,7 +5,7 @@ from .cast import cast_to_dtype
 
 
 def cast_ui():
-    with gr.Row():
+    with gr.Row(elem_id="compressor_cast_row"):
         target = gr.Textbox(
             value="",
             lines=1,
@@ -18,12 +18,12 @@ def cast_ui():
             choices=DTYPE,
             value=next(iter(DTYPE)),
             label="dtype",
-            scale=2,
+            scale=1,
         )
         button = gr.Button(
             value="Convert",
             variant="primary",
-            scale=2,
+            scale=1,
         )
 
     for comp in (target, mode, button):

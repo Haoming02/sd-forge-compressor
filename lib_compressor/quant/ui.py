@@ -7,7 +7,7 @@ from .quant import quant_to_dtype
 def quant_ui():
     init_models()
 
-    with gr.Row():
+    with gr.Row(elem_id="compressor_quant_row"):
         target = gr.Dropdown(
             choices=MODELS,
             value=next(iter(MODELS), None),
@@ -28,10 +28,9 @@ def quant_ui():
                 ),
                 value="int8_convrot",
                 label="Format",
-                scale=2,
             )
             firstlast = gr.Checkbox(True, label="Exclude First & Last Layers")
-        button = gr.Button(value="Convert", variant="primary")
+        button = gr.Button(value="Convert", variant="primary", scale=1)
 
     for comp in (target, mode, firstlast, button):
         comp.do_not_save_to_config = True

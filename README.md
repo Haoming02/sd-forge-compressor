@@ -6,7 +6,7 @@ This is an Extension for [Forge Neo](https://github.com/Haoming02/sd-webui-forge
 > - Use the **Quantize** section to quantize a diffusion model into `format`
 
 > [!Note]
-> Supported Formats: `fp8_scaled` / `nvfp4` / `mxfp8` / `int8_convrot` / `convrot_w4a4`
+> Supported Formats: `fp8_scaled` / `nvfp4` / `mxfp8` / `int8` / `int8_convrot` / `convrot_w4a4`
 
 > [!Important]
 > Can only convert non-quantized models (**i.e.** `fp16` / `bf16`)
@@ -16,6 +16,8 @@ This is an Extension for [Forge Neo](https://github.com/Haoming02/sd-webui-forge
 
 > [!Caution]
 > This Extension is currently **Experimental** ; use at your own risk
+
+<br>
 
 ### References
 - [Starnodes Model Converter](https://github.com/Starnodes2024/comfyui-starnodes-modelconverter)

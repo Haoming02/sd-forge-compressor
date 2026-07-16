@@ -12,6 +12,7 @@ def editor_ui():
             cast_ui()
         with gr.Accordion(label="Quantize", open=True):
             quant_ui()
+        gr.HTML('<p align="right"><i><b>Experimental</b></i></p>')
 
     return [(COMPRESSOR, "Compressor", "sd-forge-compressor")]
 
