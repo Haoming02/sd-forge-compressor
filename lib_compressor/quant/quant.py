@@ -1,12 +1,14 @@
+import inspect
 import os.path
 from json import dumps
 from typing import Final
 
 import torch
-from comfy_kitchen import quantize_per_tensor_fp8
-from comfy_kitchen.float_utils import F8_E4M3_MAX
 from comfy_kitchen.tensor import (
+    AsymW4A8Int8Layout,
+    QuantizedLayout,
     TensorCoreConvRotW4A4Layout,
+    TensorCoreFP8Layout,
     TensorCoreMXFP8Layout,
     TensorCoreNVFP4Layout,
     TensorWiseINT8Layout,
@@ -18,9 +20,6 @@ from backend.patcher.lora import string_to_seed
 
 from .. import STATE_DICT, load, save
 from . import MODELS
-
-CONVROT_GROUPSIZE: Final[int] = 256
-QUANT_GROUPSIZE: Final[int] = 64
 
 COMMON_EXCL: Final[tuple[str]] = (
     "embed",
@@ -41,10 +40,6 @@ LAYER_EXCL: list[str] = []
 
 def _encode(info: dict[str, str]) -> torch.Tensor:
     return torch.tensor(list(dumps(info).encode("utf-8")), dtype=torch.uint8)
-
-
-def _scale_amax(w: torch.Tensor, max_value: float) -> torch.Tensor:
-    return w.abs().max().float().div(max_value).clamp(min=1e-8)
 
 
 def _parse_layers(layers: list[str]):
@@ -70,7 +65,20 @@ def _parse_layers(layers: list[str]):
         LAYER_EXCL.extend([min_excl, max_excl])
 
 
-def _filter(key: str, weight: torch.Tensor, *, group_size: int = 64) -> bool:
+def _parse_parameters(layout: QuantizedLayout) -> dict[str, int]:
+    params = {}
+
+    sig = inspect.signature(layout)
+    for name, param in sig.parameters.items():
+        if name == "stochastic_rounding":
+            continue
+        if isinstance(param.default, int):
+            params[name] = param.default
+
+    return params
+
+
+def _filter(key: str, weight: torch.Tensor, group_size: int) -> bool:
     if not key.endswith(".weight"):
         return False
     if weight.dtype not in (torch.float16, torch.bfloat16, torch.float32):
@@ -82,152 +90,41 @@ def _filter(key: str, weight: torch.Tensor, *, group_size: int = 64) -> bool:
     if any(excl in key.lower() for excl in COMMON_EXCL):
         return False
 
-    in_features: int = weight.size(0)
-    return in_features > group_size and in_features % group_size == 0
+    return weight.size(0) % group_size == 0
 
 
-def quant_fp8(state_dict: STATE_DICT) -> STATE_DICT:
+def _quant(
+    state_dict: STATE_DICT,
+    layout: QuantizedLayout,
+    params: dict,
+    quant_info: torch.Tensor,
+) -> STATE_DICT:
     quant_sd = {}
-    quant_info = {"format": "float8_e4m3fn"}
 
     device = get_torch_device()
+    group_size = params.get("convrot_groupsize", 64)
+    rounding = "stochastic_rounding" in inspect.signature(layout.quantize).parameters
 
     _keys = list(state_dict.keys())
     for key in tqdm(_keys):
         weight = state_dict.pop(key)
 
-        if not _filter(key, weight):
-            quant_sd[key] = weight.to(dtype=torch.bfloat16)
-            continue
-
-        weight = weight.to(device=device)
-        weight_scale = _scale_amax(weight, F8_E4M3_MAX)
-        weight_quantized = quantize_per_tensor_fp8(weight, weight_scale)
-
-        quant_sd[key] = weight_quantized.cpu()
-        quant_sd[key.replace(".weight", ".weight_scale")] = weight_scale.cpu()
-        quant_sd[key.replace(".weight", ".comfy_quant")] = _encode(quant_info)
-
-    return quant_sd
-
-
-def quant_nvfp4(state_dict: STATE_DICT) -> STATE_DICT:
-    quant_sd = {}
-    quant_info = {"format": "nvfp4"}
-
-    device = get_torch_device()
-
-    _keys = list(state_dict.keys())
-    for key in tqdm(_keys):
-        weight = state_dict.pop(key)
-
-        if not _filter(key, weight):
+        if not _filter(key, weight, group_size):
             quant_sd[key] = weight.to(dtype=torch.bfloat16)
             continue
 
         weight = weight.to(device=device)
 
-        qdata, params = TensorCoreNVFP4Layout.quantize(weight, scale="recalculate")
+        if rounding:
+            params["stochastic_rounding"] = string_to_seed(key)
 
-        quant_sd[key] = qdata.cpu()
-        quant_sd[key.replace(".weight", ".weight_scale")] = params.block_scale.cpu()
-        quant_sd[key.replace(".weight", ".weight_scale_2")] = params.scale.cpu()
-        quant_sd[key.replace(".weight", ".comfy_quant")] = _encode(quant_info)
+        _qdata, _params = layout.quantize(weight, **params)
+        mapping: dict[str, torch.Tensor] = layout.state_dict_tensors(_qdata, _params)
 
-    return quant_sd
+        for suffix, tensor in mapping.items():
+            quant_sd[key + suffix] = tensor.cpu()
 
-
-def quant_mxfp8(state_dict: STATE_DICT) -> STATE_DICT:
-    quant_sd = {}
-    quant_info = {"format": "mxfp8"}
-
-    device = get_torch_device()
-
-    _keys = list(state_dict.keys())
-    for key in tqdm(_keys):
-        weight = state_dict.pop(key)
-
-        if not _filter(key, weight):
-            quant_sd[key] = weight.to(dtype=torch.bfloat16)
-            continue
-
-        weight = weight.to(device=device)
-
-        qdata, params = TensorCoreMXFP8Layout.quantize(weight)
-
-        quant_sd[key] = qdata.cpu()
-        quant_sd[key.replace(".weight", ".weight_scale")] = params.scale.cpu()
-        quant_sd[key.replace(".weight", ".comfy_quant")] = _encode(quant_info)
-
-    return quant_sd
-
-
-def quant_int8(state_dict: STATE_DICT, convrot: bool = False) -> STATE_DICT:
-    quant_sd = {}
-    quant_info = {"format": "int8_tensorwise"}
-    if convrot:
-        quant_info["convrot"] = True
-        quant_info["convrot_groupsize"] = CONVROT_GROUPSIZE
-
-    device = get_torch_device()
-
-    _keys = list(state_dict.keys())
-    for key in tqdm(_keys):
-        weight = state_dict.pop(key)
-
-        if not _filter(key, weight, group_size=CONVROT_GROUPSIZE if convrot else 64):
-            quant_sd[key] = weight.to(torch.bfloat16)
-            continue
-
-        weight = weight.to(device=device)
-
-        qdata, params = TensorWiseINT8Layout.quantize(
-            weight,
-            stochastic_rounding=string_to_seed(key),
-            is_weight=True,
-            per_channel=True,
-            convrot=convrot,
-            convrot_groupsize=CONVROT_GROUPSIZE,
-        )
-
-        quant_sd[key] = qdata.cpu()
-        quant_sd[key.replace(".weight", ".weight_scale")] = params.scale.cpu()
-        quant_sd[key.replace(".weight", ".comfy_quant")] = _encode(quant_info)
-
-    return quant_sd
-
-
-def quant_int4(state_dict: STATE_DICT) -> STATE_DICT:
-    quant_sd = {}
-    quant_info = {
-        "format": "convrot_w4a4",
-        "convrot_groupsize": CONVROT_GROUPSIZE,
-        "quant_group_size": QUANT_GROUPSIZE,
-    }
-
-    device = get_torch_device()
-
-    _keys = list(state_dict.keys())
-    for key in tqdm(_keys):
-        weight = state_dict.pop(key)
-
-        if not _filter(key, weight, group_size=max(CONVROT_GROUPSIZE, QUANT_GROUPSIZE)):
-            quant_sd[key] = weight.to(dtype=torch.bfloat16)
-            continue
-
-        weight = weight.to(device=device)
-
-        qdata, params = TensorCoreConvRotW4A4Layout.quantize(
-            weight,
-            convrot_groupsize=CONVROT_GROUPSIZE,
-            quant_group_size=QUANT_GROUPSIZE,
-            stochastic_rounding=string_to_seed(key),
-            linear_dtype="int4",
-        )
-
-        quant_sd[key] = qdata.cpu()
-        quant_sd[key.replace(".weight", ".weight_scale")] = params.scale.cpu()
-        quant_sd[key.replace(".weight", ".comfy_quant")] = _encode(quant_info)
+        quant_sd[key.replace(".weight", ".comfy_quant")] = quant_info.clone()
 
     return quant_sd
 
@@ -243,19 +140,49 @@ def quant_to_dtype(model: str, mode: str, exclude: bool):
 
     match mode:
         case "fp8_scaled":
-            new_sd = quant_fp8(sd)
+            layout = TensorCoreFP8Layout
+            info = {"format": "float8_e4m3fn"}
+            params = {"scale": "recalculate", "dtype": torch.float8_e4m3fn}
         case "nvfp4":
-            new_sd = quant_nvfp4(sd)
+            layout = TensorCoreNVFP4Layout
+            info = {"format": "nvfp4"}
+            params = {"scale": "recalculate"}
         case "mxfp8":
-            new_sd = quant_mxfp8(sd)
+            layout = TensorCoreMXFP8Layout
+            info = {"format": "mxfp8"}
+            params = {}
         case "int8":
-            new_sd = quant_int8(sd)
+            layout = TensorWiseINT8Layout
+            info = {"format": "int8_tensorwise"}
+            params = {
+                "is_weight": True,
+                "per_channel": True,
+                "convrot": False,
+            }
         case "int8_convrot":
-            new_sd = quant_int8(sd, True)
-        case "convrot_w4a4":
-            new_sd = quant_int4(sd)
+            layout = TensorWiseINT8Layout
+            defaults = _parse_parameters(layout)
+            info = {"format": "int8_tensorwise", "convrot": True, **defaults}
+            params = {
+                "is_weight": True,
+                "per_channel": True,
+                "convrot": True,
+                **defaults,
+            }
+        case "w4a4_convrot":
+            layout = TensorCoreConvRotW4A4Layout
+            defaults = _parse_parameters(layout)
+            info = {"format": "convrot_w4a4", **defaults}
+            params = {**defaults, "linear_dtype": "int4"}
+        case "w4a8_convrot":
+            layout = AsymW4A8Int8Layout
+            defaults = _parse_parameters(layout)
+            info = {"format": "asym_w4a8_int8", **defaults}
+            params = {**defaults, "scale_dtype": torch.float8_e4m3fn}
 
+    new_sd = _quant(sd, layout, params, _encode(info))
     del sd
+
     soft_empty_cache()
 
     file = os.path.splitext(path)[0]
