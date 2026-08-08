@@ -68,9 +68,11 @@ def _parse_layers(layers: list[str]):
 def _parse_parameters(layout: QuantizedLayout) -> dict[str, int]:
     params = {}
 
-    sig = inspect.signature(layout)
+    sig = inspect.signature(layout.quantize)
     for name, param in sig.parameters.items():
         if name == "stochastic_rounding":
+            continue
+        if isinstance(param.default, bool):
             continue
         if isinstance(param.default, int):
             params[name] = param.default
@@ -90,7 +92,7 @@ def _filter(key: str, weight: torch.Tensor, group_size: int) -> bool:
     if any(excl in key.lower() for excl in COMMON_EXCL):
         return False
 
-    return weight.size(0) % group_size == 0
+    return weight.size(0) % group_size == 0 and weight.size(1) % group_size == 0
 
 
 def _quant(
