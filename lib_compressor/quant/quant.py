@@ -179,7 +179,14 @@ def quant_to_dtype(model: str, mode: str, exclude: bool):
         case "w4a8_convrot":
             layout = AsymW4A8Int8Layout
             defaults = _parse_parameters(layout)
+            defaults["bits"] = 4
             info = {"format": "asym_w4a8_int8", **defaults}
+            params = {**defaults, "scale_dtype": torch.float8_e4m3fn}
+        case "w6a8_convrot":
+            layout = AsymW4A8Int8Layout
+            defaults = _parse_parameters(layout)
+            defaults["bits"] = 6
+            info = {"format": "w6a8_int8", **defaults}
             params = {**defaults, "scale_dtype": torch.float8_e4m3fn}
 
     new_sd = _quant(sd, layout, params, _encode(info))

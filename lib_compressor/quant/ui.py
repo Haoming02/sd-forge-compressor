@@ -26,6 +26,7 @@ def quant_ui():
                     "int8_convrot",
                     "w4a4_convrot",
                     "w4a8_convrot",
+                    "w6a8_convrot",
                 ),
                 value="int8_convrot",
                 label="Format",
