@@ -1,16 +1,24 @@
 import gradio as gr
 
-from . import MODELS, init_models
+from modules_forge.main_entry import on_refresh_checkpoint
+
 from .quant import quant_to_dtype
 
 
+def init_models() -> list[str]:
+    from modules.sd_models import checkpoints_list
+
+    ckpt: list[str] = [c.filename for c in checkpoints_list.values()]
+    return [title for title in sorted(ckpt) if not title.lower().endswith(".gguf")]
+
+
 def quant_ui():
-    init_models()
+    models = init_models()
 
     with gr.Row(elem_id="compressor_quant_row"):
         target = gr.Dropdown(
-            choices=MODELS,
-            value=next(iter(MODELS), None),
+            choices=models,
+            value=next(iter(models), None),
             type="value",
             filterable=True,
             label="Model to Convert",
@@ -36,6 +44,12 @@ def quant_ui():
 
     for comp in (target, mode, firstlast, button):
         comp.do_not_save_to_config = True
+
+    def _refresh_models():
+        models = init_models()
+        return gr.update(value=next(iter(models), None), choices=models)
+
+    on_refresh_checkpoint(_refresh_models, outputs=target)
 
     button.click(
         fn=lambda: gr.update(interactive=False),

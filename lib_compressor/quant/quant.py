@@ -19,7 +19,6 @@ from backend.memory_management import get_torch_device, soft_empty_cache
 from backend.patcher.lora import string_to_seed
 
 from .. import STATE_DICT, load, save
-from . import MODELS
 
 COMMON_EXCL: Final[tuple[str]] = (
     "embed",
@@ -132,8 +131,7 @@ def _quant(
 
 
 @torch.inference_mode()
-def quant_to_dtype(model: str, mode: str, exclude: bool):
-    path: str = MODELS[model]
+def quant_to_dtype(path: os.PathLike, mode: str, exclude: bool):
     sd, meta = load(path)
     LAYER_EXCL.clear()
 
